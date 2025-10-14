@@ -10,6 +10,8 @@ import tqdm # For a nice progress bar
 def sd3_inf(args):
     pipeline = StableDiffusion3Pipeline.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers",
+        text_encoder_3=None,
+        tokenizer_3=None,
         torch_dtype=torch.float16
     )
     pipeline.to("cuda")
@@ -63,22 +65,26 @@ def sd3_inf(args):
         total_transformer_flops += step_flops
         
         # Log the FLOPs for the current step
-        active_ratio = ras_manager.MANAGER.get_active_token_ratio()
+        if ras_manager.MANAGER.is_RAS_step:
+            active_ratio = 0.5
+        else:
+            # On a normal step, all tokens are active
+            active_ratio = 1.0
         print(f"Step {i:02d} | Active Tokens: {active_ratio:.1%} | GFLOPs: {step_flops / 1e9:.2f}")
-
-        # ---> 3. Run the actual model prediction <---
-        noise_pred = pipeline.transformer(**transformer_inputs).sample
+        # # ---> 3. Run the actual model prediction <---
+        # noise_pred = pipeline.transformer(**transformer_inputs).sample
         
-        # Perform guidance
-        noise_pred_text, noise_pred_uncond = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_text - noise_pred_uncond)
+        # # Perform guidance
+        # noise_pred_text, noise_pred_uncond = noise_pred.chunk(2)
+        # noise_pred = noise_pred_uncond + 7 * (noise_pred_text - noise_pred_uncond)
         
-        # Scheduler step
-        latents = pipeline.scheduler.step(noise_pred, t, latents).prev_sample
+        # # Scheduler step
+        # latents = pipeline.scheduler.step(noise_pred, t, latents).prev_sample
+        ras_manager.MANAGER.increase_step() 
 
     # 5. Decode the final image
-    image = pipeline.vae.decode(latents / pipeline.vae.config.scaling_factor).sample
-    image = pipeline.image_processor.postprocess(image, output_type="pil")[0]
+    # image = pipeline.vae.decode(latents / pipeline.vae.config.scaling_factor).sample
+    # image = pipeline.image_processor.postprocess(image, output_type="pil")[0]
     
     # ---> 4. Print the final results <---
     total_gflops = total_transformer_flops / 1e9
