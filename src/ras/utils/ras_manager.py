@@ -23,7 +23,8 @@ class ras_manager:
         self.image_rotary_emb_skip = None
         self.cached_scaled_noise = None
         self.skip_token_num_list = []
-
+        self.current_active_patchified_index = None
+        self.current_active_latent_index = None
 
     def set_parameters(self, args):
         self.patch_size = args.patch_size
@@ -41,7 +42,13 @@ class ras_manager:
         self.weight = args.width
         self.high_ratio = args.high_ratio
         self.enable_index_fusion = args.enable_index_fusion
+        self.std_experiment = args.std_experiment
+        self.name_folder = args.name_folder
+        self.method = args.method
+        print(f"new method used: {self.method}")
+        print("going to calc the skip token gen")
         self.generate_skip_token_list()
+        print("ho gai calc")
 
 
     def generate_skip_token_list(self):

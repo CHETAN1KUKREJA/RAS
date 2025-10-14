@@ -10,7 +10,7 @@ def parse_args():
     parser.add_argument("--sample_ratio", type=float, default=0.5, help="Average sample ratio during each step for RAS")
     parser.add_argument("--replace_with_flash_attn", action="store_true", help="Replace the attention mechanism with flash attention")
     parser.add_argument("--error_reset_steps", type=str, default="12,22", help="Dense steps to reset the error, use comma to separate")
-    parser.add_argument("--metric", type=str, default="std", choices=["std", "l2norm"], help="Metric to calculate the patch selection, currently support std and l2norm")
+    parser.add_argument("--metric", type=str, default="std", choices=["std", "l2norm","mixture"], help="Metric to calculate the patch selection, currently support std and l2norm")
     parser.add_argument("--high_ratio", type=float, default=1, help="Based on the metric selected, the ratio of the high value chosen to be cached. Range from 0 to 1")
     parser.add_argument("--height", type=int, default=1024, help="Height of the image")
     parser.add_argument("--width", type=int, default=1024, help="Width of the image")
@@ -21,5 +21,8 @@ def parse_args():
     parser.add_argument("--skip_num_step", type=int, default=0, help="Parameter for dynamic skip token numbers. The skip token number increases/decreases by this value every skip_num_step_length steps. Can be negative or positive.")
     parser.add_argument("--skip_num_step_length", type=int, default=0, help="The interval to change the skip token number")
     parser.add_argument("--enable_index_fusion", action="store_true", help="Enable index fusion for RAS")
-
+    parser.add_argument("--std_experiment", action="store_true", help="enables the saving of the histogram")
+    parser.add_argument("--name_folder", help="what is the name of the std folder")
+    parser.add_argument("--method", type=str, default="default", help="which new methods to use")
+    
     return parser.parse_args()

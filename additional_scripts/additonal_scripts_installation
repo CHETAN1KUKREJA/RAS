@@ -1,0 +1,1 @@
+pip install torch torchvision Pillow tqdm open-clip-torch datasets huggingface-hub

@@ -35,7 +35,7 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 @dataclass
-class RASFlowMatchEulerDiscreteSchedulerOutput(BaseOutput):
+class VayunRASFlowMatchEulerDiscreteSchedulerOutput(BaseOutput):
     """
     Output class for the scheduler's `step` function output.
 
@@ -48,7 +48,7 @@ class RASFlowMatchEulerDiscreteSchedulerOutput(BaseOutput):
     prev_sample: torch.FloatTensor
 
 
-class RASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
+class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
     """
     RAS Euler scheduler.
 
@@ -123,6 +123,41 @@ class RASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             metric = torch.std(diff, dim=-1).view(height // ras_manager.MANAGER.patch_size, ras_manager.MANAGER.patch_size, width // ras_manager.MANAGER.patch_size, ras_manager.MANAGER.patch_size).transpose(-2, -3).mean(-1).mean(-1).view(-1)
         elif ras_manager.MANAGER.metric == "l2norm":
             metric = torch.norm(diff, p=2, dim=-1).view(height // ras_manager.MANAGER.patch_size, ras_manager.MANAGER.patch_size, width // ras_manager.MANAGER.patch_size, ras_manager.MANAGER.patch_size).transpose(-2, -3).mean(-1).mean(-1).view(-1)
+        elif ras_manager.MANAGER.metric == "mixture":
+            # 1. Calculate both base metrics for each patch
+            std_metric = torch.std(diff, dim=-1).view(height // ras_manager.MANAGER.patch_size, ras_manager.MANAGER.patch_size, width // ras_manager.MANAGER.patch_size, ras_manager.MANAGER.patch_size).transpose(-2, -3).mean(-1).mean(-1).view(-1)
+            mean_metric = torch.mean(diff, dim=-1).view(height // ras_manager.MANAGER.patch_size, ras_manager.MANAGER.patch_size, width // ras_manager.MANAGER.patch_size, ras_manager.MANAGER.patch_size).transpose(-2, -3).mean(-1).mean(-1).view(-1)
+
+            # 2. Sort both metrics to get ranked indices
+            std_indices = torch.sort(std_metric).indices
+            mean_indices = torch.sort(mean_metric).indices
+            
+            num_tokens = std_metric.shape[0]
+            
+            # 3. Define top 30% and bottom 40% counts
+            top_k = int(num_tokens * 0.30)
+            bottom_k = int(num_tokens * 0.40)
+
+            # 4. Get the candidate indices from both metrics
+            # Candidates are the bottom 40% and top 30% of tokens for each metric
+            std_candidates = torch.cat([std_indices[:bottom_k], std_indices[-top_k:]])
+            mean_candidates = torch.cat([mean_indices[:bottom_k], mean_indices[-top_k:]])
+
+            # 5. Find the intersection: tokens that are candidates in BOTH lists
+            # This is the core of the mixture strategy
+            std_candidates_set = set(std_candidates.tolist())
+            mean_candidates_set = set(mean_candidates.tolist())
+            
+            intersection_set = std_candidates_set.intersection(mean_candidates_set)
+            
+            cached_patchified_indices = torch.tensor(list(intersection_set), dtype=std_indices.dtype, device=std_indices.device)
+            print("the number of cached_patchified_indices:",cached_patchified_indices.shape)
+            # The 'other' indices are all tokens not in our selected intersection
+            all_indices_set = set(range(num_tokens))
+            other_indices_set = all_indices_set.difference(intersection_set)
+            other_patchified_indices = torch.tensor(list(other_indices_set), dtype=std_indices.dtype, device=std_indices.device)
+            latent_cached_indices = self.extract_latents_index_from_patched_latents_index(cached_patchified_indices, height)
+            return latent_cached_indices, other_patchified_indices
         else:
             raise ValueError("Unknown metric")
 
@@ -185,7 +220,7 @@ class RASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         s_noise: float = 1.0,
         generator: Optional[torch.Generator] = None,
         return_dict: bool = True,
-    ) -> Union[RASFlowMatchEulerDiscreteSchedulerOutput, Tuple]:
+    ) -> Union[VayunRASFlowMatchEulerDiscreteSchedulerOutput, Tuple]:
         """
         Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
         process from the learned model outputs (most often the predicted noise).
@@ -290,6 +325,7 @@ class RASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             self.mean_history.append(mean_metric.clone().detach().cpu())
 
         if ras_manager.MANAGER.sample_ratio < 1.0 and ras_manager.MANAGER.is_next_RAS_step:
+            print("cache hore hai")
             latent_cached_indices, other_patchified_indices = self.ras_selection(sample, diff, height, width)
             ras_manager.MANAGER.cached_scaled_noise = model_output.squeeze(0).view(latent_dim, -1)[:, latent_cached_indices]
             ras_manager.MANAGER.cached_index = latent_cached_indices
@@ -305,4 +341,4 @@ class RASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         if not return_dict:
             return (prev_sample,)
 
-        return RASFlowMatchEulerDiscreteSchedulerOutput(prev_sample=prev_sample)
+        return VayunRASFlowMatchEulerDiscreteSchedulerOutput(prev_sample=prev_sample)
