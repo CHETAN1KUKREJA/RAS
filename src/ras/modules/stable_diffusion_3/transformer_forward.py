@@ -77,8 +77,15 @@ def ras_forward(
             logger.warning(
                 "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
             )
+        # --- ADD THESE DEBUG LINES ---
+    print("--- DEBUGGING ras_forward ---")
+    print(f"Type of hidden_states variable: {type(hidden_states)}")
+    print(f"Content of hidden_states dictionary: {hidden_states}")
+    # --- END OF DEBUG LINES ---
 
-    height, width = hidden_states.shape[-2:]
+    actual_hidden_states = hidden_states['hidden_states']
+    print(f"Type of actual_hidden_states variable: {actual_hidden_states}")
+    height, width = actual_hidden_states.shape[-2:]
 
     hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
     temb = self.time_text_embed(timestep, pooled_projections)

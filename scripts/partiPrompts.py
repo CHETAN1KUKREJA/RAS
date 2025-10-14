@@ -6,29 +6,28 @@ from ras.utils import ras_manager
 from ras.utils.ras_argparser import parse_args
 import os
 from datasets import load_dataset
-from tqdm import tqdm 
+from tqdm import tqdm
 
+# sd3_inf function remains the same...
 def sd3_inf(args):
     pipeline = StableDiffusion3Pipeline.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers",
-        # text_encoder_3=None,
-        # tokenizer_3=None,
         torch_dtype=torch.float16
     )
 
-    pipeline.to("cuda") 
+    pipeline.to("cuda")
     pipeline = update_sd3_pipeline(pipeline)
     generator = torch.Generator("cuda").manual_seed(args.seed) if args.seed is not None else None
     numsteps = args.num_inference_steps
     image = pipeline(
-                    generator=generator,
-                    num_inference_steps=numsteps,
-                    prompt=args.prompt,
-                    negative_prompt=args.negative_prompt,
-                    height=args.height,
-                    width=args.width,
-                    guidance_scale=7.0,
-                    ).images[0]
+                         generator=generator,
+                         num_inference_steps=numsteps,
+                         prompt=args.prompt,
+                         negative_prompt=args.negative_prompt,
+                         height=args.height,
+                         width=args.width,
+                         guidance_scale=7.0,
+                         ).images[0]
     image.save(args.output)
 
 
@@ -37,13 +36,12 @@ def evaluate_on_parti(args):
     Main function to run the evaluation pipeline.
     It loads the model, loops through the PartiPrompts dataset,
     and saves each generated image.
+    **It now skips images that have already been generated.**
     """
     # 1. SETUP: Load model and create output directory
     print("### Setting up the pipeline... ###")
     pipeline = StableDiffusion3Pipeline.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers",
-        # text_encoder_3=None,
-        # tokenizer_3=None,
         torch_dtype=torch.float16
     )
     pipeline.to("cuda")
@@ -68,6 +66,11 @@ def evaluate_on_parti(args):
         filename = f"image_{i}.png"
         output_path = os.path.join(output_dir, filename)
 
+        # >>> CHANGE: Check if the file already exists <<<
+        if os.path.exists(output_path):
+            # If it exists, skip to the next iteration
+            continue
+
         # Generate the image
         image = pipeline(
             prompt=prompt,
@@ -80,10 +83,12 @@ def evaluate_on_parti(args):
         ).images[0]
 
         # Save the image
-        print(image.size)
         image.save(output_path)
-        print(f"Saved image {i+1}/{len(prompts_list)}: {output_path}")
-    print(f"### Evaluation complete! {len(prompts_list)} images saved in {output_dir} ###")
+        # Reducing print frequency to avoid clutter, tqdm already shows progress
+        # print(f"Saved image {i+1}/{len(prompts_list)}: {output_path}")
+
+    print(f"### Evaluation complete! {len(prompts_list)} images are in {output_dir} ###")
+
 
 if __name__ == "__main__":
     args = parse_args()

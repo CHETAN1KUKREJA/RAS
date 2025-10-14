@@ -1,6 +1,7 @@
 # new things that i added
 std_analysis_*/
 outputs/
+diffusers/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
