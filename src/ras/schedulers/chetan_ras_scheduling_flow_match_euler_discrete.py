@@ -239,7 +239,9 @@ class ChetanRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             ras_manager.MANAGER.cached_index = latent_cached_indices
             ras_manager.MANAGER.cached_patch_indices = cached_patchified_indices
             ras_manager.MANAGER.other_patchified_index = other_patchified_indices
-        
+            ras_manager.MANAGER.current_active_latent_index = self.extract_latents_index_from_patched_latents_index(other_patchified_indices, height)
+            ras_manager.MANAGER.current_active_patchified_index = other_patchified_indices
+
         self._step_index += 1
         ras_manager.MANAGER.increase_step()
         if ras_manager.MANAGER.current_step >= ras_manager.MANAGER.num_steps:

@@ -45,6 +45,17 @@ class ras_manager:
         self.std_experiment = args.std_experiment
         self.name_folder = args.name_folder
         self.method = args.method
+
+        # viyom method things
+        if(self.metric == "mixture"):
+            self.small_set = None
+            self.large_set = None
+            self.mean_threshold_small = 0.001
+            self.std_threshold_small = 0.001
+            self.mean_threshold_large = 0.001
+            self.std_threshold_large = 0.001
+
+
         print(f"new method used: {self.method}")
         print("going to calc the skip token gen")
         self.generate_skip_token_list()

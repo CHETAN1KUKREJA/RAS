@@ -90,6 +90,14 @@ class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                         #  invert_sigmas=invert_sigmas
                          )
         self.drop_cnt = None
+
+        # prediction
+        self.max_taylor_order = 4
+        self.token_taylor_cache = None
+        self.last_step = None
+        self.prev_last_step = None
+        self.factorials = torch.tensor([math.factorial(i) for i in range(self.max_taylor_order + 1)])
+
         # code for experimentation evaluation
         if ras_manager.MANAGER.std_experiment:
             self.std_history = None
@@ -101,6 +109,18 @@ class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
     def _init_ras_config(self, latents):
         self.drop_cnt = torch.zeros((latents.shape[-2] // ras_manager.MANAGER.patch_size * latents.shape[-1] // ras_manager.MANAGER.patch_size), device=latents.device) - len(self.sigmas)
 
+        # the prediciton code snippets
+        num_patches = (latents.shape[-2] // ras_manager.MANAGER.patch_size) * (latents.shape[-1] // ras_manager.MANAGER.patch_size)
+        latent_dim = latents.shape[-3]
+        patch_area = ras_manager.MANAGER.patch_size ** 2
+        self.token_taylor_cache = torch.zeros(
+            num_patches, self.max_taylor_order+1, latent_dim, patch_area,
+            device=latents.device, dtype=latents.dtype
+        )
+        self.last_step = torch.full((num_patches,), -1, device=latents.device, dtype=torch.long)
+        self.prev_last_step = torch.full((num_patches,), -1, device=latents.device, dtype=torch.long)
+        self.factorials = self.factorials.to(latents.device, dtype=latents.dtype)
+
         # code for experimentation evaluation        
         if ras_manager.MANAGER.std_experiment:
             self.std_history = []
@@ -110,11 +130,48 @@ class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
 
     def extract_latents_index_from_patched_latents_index(self, indices, height):
-        # # TODO add non-square case
-        # # TODO support PATCH_SIZE != 2
-        flattened_indices = indices // (height // ras_manager.MANAGER.patch_size) * ras_manager.MANAGER.patch_size * height + indices % (height // ras_manager.MANAGER.patch_size) *ras_manager.MANAGER.patch_size
-        flattened_indices = (flattened_indices[:, None] + torch.tensor([0, height + 1, 1, height], dtype=indices.dtype, device=indices.device)[None, :]).flatten()
+        row_indices = indices // (height // ras_manager.MANAGER.patch_size)
+        col_indices = indices % (height // ras_manager.MANAGER.patch_size)
+        
+        start_indices = row_indices * ras_manager.MANAGER.patch_size * height + col_indices * ras_manager.MANAGER.patch_size
+        
+        # This creates offsets for a 2x2 patch. Assumes patch_size=2.
+        # Offsets should be [0, 1, height, height+1] for a standard row-major layout
+        if ras_manager.MANAGER.patch_size != 2:
+             logger.warn(f"extract_latents_index_from_patched_latents_index assumes patch_size=2. Results may be incorrect.")
+        offsets = torch.tensor([0, 1, height, height + 1], dtype=indices.dtype, device=indices.device)
+        flattened_indices = (start_indices.unsqueeze(-1) + offsets).flatten()
+        
         return flattened_indices
+    
+    def _update_token_derivatives(self, active_patch_indices, active_features):
+        if active_patch_indices.numel() == 0: return
+        updatable_mask = self.prev_last_step[active_patch_indices] >= 0
+        updatable_indices = active_patch_indices[updatable_mask]
+        if updatable_indices.numel() > 0:
+            old_derivatives = self.token_taylor_cache[updatable_indices].clone()
+        self.token_taylor_cache[active_patch_indices, 0] = active_features
+        if updatable_indices.numel() > 0:
+            for i in range(self.max_taylor_order):
+                new_lower_order = self.token_taylor_cache[updatable_indices, i]
+                old_lower_order = old_derivatives[:, i]
+                self.token_taylor_cache[updatable_indices, i + 1] = new_lower_order - old_lower_order
+            # if self._step_index is not None and self._step_index % 5 == 0:
+            #     highest_deriv = self.token_taylor_cache[updatable_indices, -1]
+            #     print(f"[DEBUG]   Updating Derivatives | Highest Order Deriv Max: {highest_deriv.abs().max():.4f}")
+
+    def _predict_token_output(self):
+        last_steps = self.last_step
+        x = self._step_index - last_steps
+        derivatives = self.token_taylor_cache
+        num_patches = derivatives.shape[0]
+        dampening_factor = 1/8
+        orders = torch.arange(self.max_taylor_order + 1, device=derivatives.device, dtype=derivatives.dtype)
+        x_powers = x.view(-1, 1) ** orders
+        coeffs = (x_powers / self.factorials).view(num_patches, -1, 1, 1)
+        dampening_weights = (dampening_factor ** orders).view(1, -1, 1, 1)
+        predicted_outputs = torch.sum(coeffs * derivatives * dampening_weights, dim=1)
+        return last_steps, predicted_outputs
 
     def ras_selection(self, sample, diff, height, width):
         diff = diff.squeeze(0).permute(1, 2, 0)
@@ -133,29 +190,50 @@ class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             mean_indices = torch.sort(mean_metric).indices
             
             num_tokens = std_metric.shape[0]
-            
-            # 3. Define top 30% and bottom 40% counts
-            top_k = int(num_tokens * 0.30)
-            bottom_k = int(num_tokens * 0.40)
 
-            # 4. Get the candidate indices from both metrics
-            # Candidates are the bottom 40% and top 30% of tokens for each metric
-            std_candidates = torch.cat([std_indices[:bottom_k], std_indices[-top_k:]])
-            mean_candidates = torch.cat([mean_indices[:bottom_k], mean_indices[-top_k:]])
+            low_std_thresh = ras_manager.MANAGER.std_threshold_small
+            low_mean_thresh = ras_manager.MANAGER.mean_threshold_small
+            high_std_thresh = ras_manager.MANAGER.std_threshold_large
+            high_mean_thresh = ras_manager.MANAGER.mean_threshold_large
 
-            # 5. Find the intersection: tokens that are candidates in BOTH lists
-            # This is the core of the mixture strategy
-            std_candidates_set = set(std_candidates.tolist())
-            mean_candidates_set = set(mean_candidates.tolist())
+            low_std_indices = torch.where(std_metric < low_std_thresh)[0]
+            low_mean_indices = torch.where(mean_metric < low_mean_thresh)[0]
+            high_std_indices = torch.where(std_metric > high_std_thresh)[0]
+            high_mean_indices = torch.where(mean_metric > high_mean_thresh)[0]
+
+
+            low_std_set = set(low_std_indices.tolist())
+            low_mean_set = set(low_mean_indices.tolist())
+            high_std_set = set(high_std_indices.tolist())
+            high_mean_set = set(high_mean_indices.tolist())
+
+            small_set_py = low_std_set.intersection(low_mean_set)
             
-            intersection_set = std_candidates_set.intersection(mean_candidates_set)
-            
-            cached_patchified_indices = torch.tensor(list(intersection_set), dtype=std_indices.dtype, device=std_indices.device)
-            print("the number of cached_patchified_indices:",cached_patchified_indices.shape)
-            # The 'other' indices are all tokens not in our selected intersection
+            # Set 2: High std AND High mean
+            large_set_py = high_std_set.intersection(high_mean_set)
+
+            # 6. Convert to tensors and store them on self (as requested)
+            self.small_set = torch.tensor(list(small_set_py), dtype=torch.long, device=std_metric.device)
+            self.large_set = torch.tensor(list(large_set_py), dtype=torch.long, device=std_metric.device)
+
+            print(f"--- RAS Mixture Debug ---")
+            print(f"Low/Low Set (small_set) size: {len(ras_manager.MANAGER.small_set)}")
+            print(f"Low/Low Set indices: {ras_manager.MANAGER.small_set}")
+            print(f"High/High Set (larger_set) size: {len(ras_manager.MANAGER.larger_set)}")
+            print(f"High/High Set indices: {ras_manager.MANAGER.larger_set}")
+            print(f"-------------------------")
+
+            union_set = ras_manager.MANAGER.small_set.union(ras_manager.MANAGER.larger_set)
+
+            cached_patchified_indices = torch.tensor(list(union_set), dtype=torch.long, device=std_metric.device)
+            print(f"Total cached_patchified_indices (Union): {cached_patchified_indices.shape[0]}")
+
+            # 8. The 'other' indices are all tokens NOT in the union set
             all_indices_set = set(range(num_tokens))
-            other_indices_set = all_indices_set.difference(intersection_set)
-            other_patchified_indices = torch.tensor(list(other_indices_set), dtype=std_indices.dtype, device=std_indices.device)
+            other_indices_set = all_indices_set.difference(union_set)
+            
+            other_patchified_indices = torch.tensor(list(other_indices_set), dtype=torch.long, device=std_metric.device)
+            # 9. Final processing
             latent_cached_indices = self.extract_latents_index_from_patched_latents_index(cached_patchified_indices, height)
             return latent_cached_indices, other_patchified_indices
         else:
@@ -268,15 +346,71 @@ class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
         if self._step_index == 0:
             ras_manager.MANAGER.reset_cache()
+            num_patches = (sample.shape[-2] // ras_manager.MANAGER.patch_size) * (sample.shape[-1] // ras_manager.MANAGER.patch_size)
+            ras_manager.MANAGER.current_active_patchified_index = torch.arange(num_patches, device=sample.device)
+            ras_manager.MANAGER.current_active_latent_index= self.extract_latents_index_from_patched_latents_index(ras_manager.MANAGER.current_active_patchified_index, sample.shape[-2])
 
         latent_dim, height, width = sample.shape[-3:]
-
+        flattened_model_output = model_output.squeeze(0).view(latent_dim, -1)
 
 
         assert ras_manager.MANAGER.sample_ratio > 0.0 and ras_manager.MANAGER.sample_ratio <= 1.0
         if ras_manager.MANAGER.sample_ratio < 1.0 and ras_manager.MANAGER.is_RAS_step:
-            model_output.squeeze(0).view(latent_dim, -1)[:, ras_manager.MANAGER.cached_index] = ras_manager.MANAGER.cached_scaled_noise
-            model_output = model_output.transpose(0, 1).view(latent_dim, height, width).unsqueeze(0)
+            print(f"[Step {self._step_index}] --- COMBINATION BLOCK (is_RAS_step) ---")
+            
+            patch_area = ras_manager.MANAGER.patch_size ** 2
+            num_patches = self.token_taylor_cache.shape[0] 
+            
+            combined_features = torch.zeros(
+                num_patches, latent_dim, patch_area, 
+                device=model_output.device, dtype=model_output.dtype
+            )
+            
+            # Part 1: Active Tokens (Real UNet data)
+            active_patch_indices = ras_manager.MANAGER.current_active_patchified_index
+            active_latent_indices = ras_manager.MANAGER.current_active_latent_index
+            
+            if active_patch_indices.numel() > 0:
+                original_features_flat = flattened_model_output[:, active_latent_indices]
+                original_features_patched = original_features_flat.view(latent_dim, -1, patch_area).permute(1, 0, 2)
+                combined_features[active_patch_indices] = original_features_patched
+                print(f"[Step {self._step_index}] Using {active_patch_indices.numel()} active tokens")
+
+            # Part 2: Predicted Tokens (Taylor guess)
+            if self.large_set is not None and self.large_set.numel() > 0:
+                _, predicted_features_all = self._predict_token_output() 
+                combined_features[self.large_set] = predicted_features_all[self.large_set].to(combined_features.dtype)
+                print(f"[Step {self._step_index}] Predicted {self.large_set.numel()} tokens (large_set)")
+            elif self.large_set is None:
+                 print(f"[Step {self._step_index}] self.large_set is None, skipping prediction.")
+            
+            # Part 3: Cached Tokens (Stale data)
+            has_direct_cache = ras_manager.MANAGER.cached_scaled_noise is not None
+            
+            if has_direct_cache:
+                if self.small_set is not None and self.small_set.numel() > 0:
+                    try:
+                        cached_features_patched = ras_manager.MANAGER.cached_scaled_noise.view(latent_dim, -1, patch_area).permute(1, 0, 2)
+                        if cached_features_patched.shape[0] == self.small_set.shape[0]:
+                            combined_features[self.small_set] = cached_features_patched
+                            print(f"[Step {self._step_index}] Directly placed {self.small_set.numel()} tokens (small_set)")
+                        else:
+                            print(f"[Step {self._step_index}] WARNING: Mismatch in direct cache size. Expected {self.small_set.shape[0]}, got {cached_features_patched.shape[0]}.")
+                    except Exception as e:
+                        print(f"[Step {self._step_index}] ERROR processing direct cache: {e}")
+                elif self.small_set is None:
+                    print(f"[Step {self._step_index}] Have direct cache but self.small_set is None.")
+            elif self.small_set is not None and self.small_set.numel() > 0:
+                print(f"[Step {self._step_index}] self.small_set has {self.small_set.numel()} tokens, but no direct cache was found.")
+
+            # Part 4: Reconstruct
+            all_patch_indices = torch.arange(num_patches, device=model_output.device)
+            all_latent_indices = self.extract_latents_index_from_patched_latents_index(all_patch_indices, height)
+            
+            combined_features_flat = combined_features.permute(1, 0, 2).flatten(start_dim=1)
+            new_flattened_output = torch.zeros_like(flattened_model_output) 
+            new_flattened_output[:, all_latent_indices] = combined_features_flat
+            model_output = new_flattened_output.view(1, latent_dim, height, width)
 
 
 
@@ -292,25 +426,33 @@ class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
 
 
+        # code for caching the taylor series
+        final_flattened_output = model_output.squeeze(0).view(latent_dim, -1)
+        if self._step_index < ras_manager.MANAGER.scheduler_end_step:
+            active_patch_indices = ras_manager.MANAGER.current_active_patchified_index
+            if active_patch_indices.numel() > 0:
+                patch_area = ras_manager.MANAGER.patch_size ** 2
+                latent_indices = self.extract_latents_index_from_patched_latents_index(active_patch_indices, height)
+                features_flat = final_flattened_output[:, latent_indices]
+                active_features = features_flat.view(latent_dim, -1, patch_area).permute(1, 0, 2)
+                self.prev_last_step[active_patch_indices] = self.last_step[active_patch_indices]
+                self.last_step[active_patch_indices] = self._step_index
+                self._update_token_derivatives(active_patch_indices, active_features)
+
 
         if ras_manager.MANAGER.std_experiment:
             patch_size = ras_manager.MANAGER.patch_size
             diff_permuted = diff.squeeze(0).permute(1, 2, 0)
-
             C = diff_permuted.shape[-1]
             num_patches_h = height // patch_size
             num_patches_w = width // patch_size
-
             current_patched_diff = diff_permuted.view(
                 num_patches_h, patch_size, num_patches_w, patch_size, C
             ).permute(0, 2, 1, 3, 4).reshape(-1, patch_size * patch_size * C)
-
             if self.prevDiff is not None:
                 dot_product_per_patch = (current_patched_diff * self.prevDiff).sum(dim=1)
                 self.dot_history.append(dot_product_per_patch.detach().cpu())
-
             self.prevDiff = current_patched_diff.clone().detach()
-
 
 
             if ras_manager.MANAGER.metric == "l2norm":
@@ -327,9 +469,13 @@ class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         if ras_manager.MANAGER.sample_ratio < 1.0 and ras_manager.MANAGER.is_next_RAS_step:
             print("cache hore hai")
             latent_cached_indices, other_patchified_indices = self.ras_selection(sample, diff, height, width)
-            ras_manager.MANAGER.cached_scaled_noise = model_output.squeeze(0).view(latent_dim, -1)[:, latent_cached_indices]
+            ras_manager.MANAGER.cached_scaled_noise = model_output.squeeze(0).view(latent_dim, -1)[:, self.extract_latents_index_from_patched_latents_index(ras_manager.MANAGER.small_set, height)]
             ras_manager.MANAGER.cached_index = latent_cached_indices
+            # this is for placing the prediction
             ras_manager.MANAGER.other_patchified_index = other_patchified_indices
+            ras_manager.MANAGER.current_active_latent_index = self.extract_latents_index_from_patched_latents_index(other_patchified_indices, height)
+            ras_manager.MANAGER.current_active_patchified_index = other_patchified_indices
+
         # upon completion increase step index by one
         self._step_index += 1
         ras_manager.MANAGER.increase_step()
