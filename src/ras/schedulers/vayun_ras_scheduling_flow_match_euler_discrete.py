@@ -216,14 +216,17 @@ class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             self.small_set = torch.tensor(list(small_set_py), dtype=torch.long, device=std_metric.device)
             self.large_set = torch.tensor(list(large_set_py), dtype=torch.long, device=std_metric.device)
 
+            ras_manager.MANAGER.small_set = self.small_set
+            ras_manager.MANAGER.large_set = self.large_set
+
             print(f"--- RAS Mixture Debug ---")
             print(f"Low/Low Set (small_set) size: {len(ras_manager.MANAGER.small_set)}")
             print(f"Low/Low Set indices: {ras_manager.MANAGER.small_set}")
-            print(f"High/High Set (larger_set) size: {len(ras_manager.MANAGER.larger_set)}")
-            print(f"High/High Set indices: {ras_manager.MANAGER.larger_set}")
+            print(f"High/High Set (larger_set) size: {len(ras_manager.MANAGER.large_set)}")
+            print(f"High/High Set indices: {ras_manager.MANAGER.large_set}")
             print(f"-------------------------")
 
-            union_set = ras_manager.MANAGER.small_set.union(ras_manager.MANAGER.larger_set)
+            union_set = small_set_py.union(large_set_py)
 
             cached_patchified_indices = torch.tensor(list(union_set), dtype=torch.long, device=std_metric.device)
             print(f"Total cached_patchified_indices (Union): {cached_patchified_indices.shape[0]}")

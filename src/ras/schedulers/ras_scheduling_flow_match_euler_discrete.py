@@ -249,6 +249,7 @@ class RASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         # Upcast to avoid precision issues when computing prev_sample
         sample = sample.to(torch.float32)
         sigma = self.sigmas[self.step_index]
+        print(f"Step {self._step_index}: sigma={sigma}")
         sigma_next = self.sigmas[self.step_index + 1]
         diff = (sigma_next - sigma) * model_output
         prev_sample = sample + diff
