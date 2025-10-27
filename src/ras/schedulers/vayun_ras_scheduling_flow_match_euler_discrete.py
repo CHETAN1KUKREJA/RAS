@@ -432,15 +432,29 @@ class VayunRASFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         # code for caching the taylor series
         final_flattened_output = model_output.squeeze(0).view(latent_dim, -1)
         if self._step_index < ras_manager.MANAGER.scheduler_end_step:
-            active_patch_indices = ras_manager.MANAGER.current_active_patchified_index
-            if active_patch_indices.numel() > 0:
-                patch_area = ras_manager.MANAGER.patch_size ** 2
-                latent_indices = self.extract_latents_index_from_patched_latents_index(active_patch_indices, height)
-                features_flat = final_flattened_output[:, latent_indices]
-                active_features = features_flat.view(latent_dim, -1, patch_area).permute(1, 0, 2)
-                self.prev_last_step[active_patch_indices] = self.last_step[active_patch_indices]
-                self.last_step[active_patch_indices] = self._step_index
-                self._update_token_derivatives(active_patch_indices, active_features)
+            # Get the total number of patches from the taylor cache shape
+            num_patches = self.token_taylor_cache.shape[0]
+            
+            # Create indices for ALL patches
+            all_patch_indices = torch.arange(num_patches, device=model_output.device, dtype=torch.long)
+
+            patch_area = ras_manager.MANAGER.patch_size ** 2
+            
+            # Get latent indices for ALL patches
+            latent_indices = self.extract_latents_index_from_patched_latents_index(all_patch_indices, height)
+            
+            # Get features for ALL patches from the final combined model_output
+            features_flat = final_flattened_output[:, latent_indices]
+            
+            # Reshape features for ALL patches
+            all_features = features_flat.view(latent_dim, -1, patch_area).permute(1, 0, 2)
+            
+            # Update step history for ALL patches
+            self.prev_last_step[all_patch_indices] = self.last_step[all_patch_indices]
+            self.last_step[all_patch_indices] = self._step_index
+            
+            # Update derivatives for ALL patches
+            self._update_token_derivatives(all_patch_indices, all_features)
 
 
         if ras_manager.MANAGER.std_experiment:
